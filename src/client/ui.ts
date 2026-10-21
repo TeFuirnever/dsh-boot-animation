@@ -39,12 +39,30 @@ import {
   type CurrentStore,
 } from './session.js'
 import { ensureStyle } from './styles.js'
-import { mediaUrlFor, useClientStore, type ClipInfo, type ClientStore, type FitMode } from './store.js'
+import {
+  mediaUrlFor,
+  useClientStore,
+  SETTINGS_FALLBACK_MS,
+  type ClipInfo,
+  type ClientStore,
+  type FitMode,
+} from './store.js'
 
 /** How long a play attempt may show black before the overlay gives up. */
 const STALL_TIMEOUT_MS = 25000
 /** How long an error stays readable before the overlay closes itself. */
 const ERROR_LINGER_MS = 8000
+
+/**
+ * Backoff between a failed auto-play attempt and the next one (0.4.3).
+ *
+ * A failed attempt used to be final for the launch, because the boot record was
+ * written BEFORE the play was even requested: one slow `/resolve.json` (or an
+ * empty catalog during boot) meant "no intro" for the rest of the session, with
+ * nothing on screen to explain it. The record is now written only after a clip is
+ * actually pointed at, and these are the retries that fill the gap.
+ */
+const PLAY_RETRY_DELAYS_MS = [1200, 3000, 8000]
 
 function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B'
@@ -183,6 +201,25 @@ export function BootOverlay({ store }: { store: ClientStore }): ReactElement | n
     }
   }, [url, nonce, clipId, reason, store, close])
 
+  /**
+   * Esc closes the overlay (0.4.3).
+   *
+   * The desktop client draws its own caption buttons over the top-right corner,
+   * and a native window control always wins the click — so on that surface the
+   * 「跳过」 button can be unreachable no matter what z-index it has. A keyboard
+   * exit is the one escape hatch the window chrome cannot swallow.
+   */
+  useEffect(() => {
+    if (url === null) return undefined
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') close()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [url, close])
+
   if (url === null || phase === 'idle') return null
 
   const activate = (): void => {
@@ -244,6 +281,8 @@ export function BootOverlay({ store }: { store: ClientStore }): ReactElement | n
       {
         type: 'button',
         className: 'dba-skip',
+        title: '跳过片头（也可以按 Esc）',
+        'aria-label': '跳过片头',
         onClick: (event: { stopPropagation: () => void }) => {
           event.stopPropagation()
           close()
@@ -544,7 +583,7 @@ export function PinAction({
 
   return h(
     'span',
-    { className: 'dba-pin-wrap', style: { display: 'inline-flex', alignItems: 'center' } },
+    { className: 'dba-pin-wrap' },
     h(
       'button',
       {
@@ -592,7 +631,12 @@ export function AppRoot({ store, sessionStore }: { store: ClientStore; sessionSt
   const snapshot = useClientStore(store)
   const { sessionId, isNewConversation } = useCurrentSession(sessionStore)
   const [libraryOpen, setLibraryOpen] = useState(false)
+  /** Bumped by the retry timer, so the decision effect can run again. */
+  const [attempt, setAttempt] = useState(0)
   const lastSessionRef = useRef<string | null>(null)
+  const inFlightRef = useRef(false)
+  const triesRef = useRef(0)
+  const retryTimerRef = useRef<number | null>(null)
 
   // Tell the store which conversation we are in BEFORE anything asks the host a
   // per-conversation question. Effects run in declaration order, so this lands
@@ -618,8 +662,34 @@ export function AppRoot({ store, sessionStore }: { store: ClientStore; sessionSt
     }
   }, [])
 
+  /**
+   * Stop waiting for the host's settings (0.4.3).
+   *
+   * `settingsLoaded` is a hard gate on the decision, which is correct when the
+   * payload arrives — and becomes "no intro at all, silently" when it does not.
+   * A boot animation must degrade to "plays with the host's defaults", never to
+   * "nothing happened and nothing said so".
+   */
   useEffect(() => {
-    if (sessionId === null) return
+    if (snapshot.settingsLoaded) return undefined
+    const timer = window.setTimeout(() => {
+      store.markSettingsFallback(`no answer from the host within ${String(SETTINGS_FALLBACK_MS)}ms`)
+    }, SETTINGS_FALLBACK_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [snapshot.settingsLoaded, store])
+
+  // A retry that outlives the tree would fire into a dead store.
+  useEffect(
+    () => () => {
+      if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+    },
+    [],
+  )
+
+  useEffect(() => {
     const entered = lastSessionRef.current !== sessionId
     lastSessionRef.current = sessionId
 
@@ -631,16 +701,40 @@ export function AppRoot({ store, sessionStore }: { store: ClientStore; sessionSt
       pinned: readPinned(),
       isNewConversation,
       bootPlayed: hasBootPlayed(),
-      sessionPlayed: hasPlayed(sessionId),
+      sessionPlayed: sessionId === null ? false : hasPlayed(sessionId),
     })
     if (decision.action !== 'play') return
-    // Record BEFORE asking to play, so a second pass (the session binding
-    // settling, or the host's settings payload arriving) cannot queue a second
-    // play of the same launch.
-    recordDecision(decision, sessionId)
-    log('playing the intro', { reason: decision.reason, sessionId })
-    void store.playMode('active', decision.reason)
-  }, [sessionId, isNewConversation, snapshot.settingsLoaded, snapshot.settings, store])
+    // One attempt at a time: the effect can re-run for the session binding, the
+    // settings payload and a retry tick, and none of those may queue a second
+    // overlay over the first.
+    if (inFlightRef.current) return
+
+    inFlightRef.current = true
+    log('playing the intro', { reason: decision.reason, sessionId, attempt })
+    void (async () => {
+      const started = await store.playMode('active', decision.reason)
+      inFlightRef.current = false
+      if (started) {
+        // Record only AFTER a clip is actually pointed at. Writing the launch
+        // record first is how one failed resolve (or an empty catalog during
+        // boot) consumed the intro for the rest of the launch: nothing played,
+        // and nothing would try again either.
+        recordDecision(decision, sessionId)
+        triesRef.current = 0
+        return
+      }
+      const delay = PLAY_RETRY_DELAYS_MS[triesRef.current]
+      if (delay === undefined) {
+        notify('giving up on the intro after repeated failures', { reason: decision.reason, sessionId })
+        return
+      }
+      triesRef.current += 1
+      retryTimerRef.current = window.setTimeout(() => {
+        retryTimerRef.current = null
+        setAttempt((value) => value + 1)
+      }, delay)
+    })()
+  }, [sessionId, isNewConversation, snapshot.settingsLoaded, snapshot.settings, store, attempt])
 
   // A Fragment, not a wrapper element: the overlay is `position:fixed`, and an
   // extra box in the tree is exactly the kind of change that once took this

@@ -116,8 +116,24 @@ function base(overrides = {}) {
 const decide = (overrides) => api.decidePlay(base(overrides))
 const label = (decision) => `${decision.action}:${decision.reason}`
 
-console.log('no conversation yet:')
-check(label(decide({ sessionId: null })) === 'none:no conversation yet', 'nothing plays without a session')
+console.log('no conversation yet (0.4.3: the launch is the scope, not a conversation):')
+check(
+  label(decide({ sessionId: null })) === 'play:app-start',
+  'the launch intro no longer waits for a session binding',
+)
+check(
+  label(decide({ sessionId: null, bootPlayed: true })) === 'none:this launch already played',
+  'and it is still once per launch, session or no session',
+)
+check(
+  label(decide({ sessionId: null, settings: { ...base().settings, playOnAppStart: false } })) ===
+    'none:no conversation yet',
+  'with the switch OFF a session is still required — that rule IS about a conversation',
+)
+check(
+  label(decide({ sessionId: null, pinned: 'session-1' })) === 'play:app-start',
+  'a pin cannot match while there is no session, so the normal rule applies',
+)
 
 console.log('\nplayOnAppStart = ON (the default):')
 check(label(decide()) === 'play:app-start', 'an ordinary conversation still gets the launch intro')

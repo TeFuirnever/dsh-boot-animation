@@ -5,6 +5,65 @@
 > Changes that a user can see, one section per release. English one-liners are
 > included so an English reader can scan the list.
 
+## 0.4.3 — 2026-10-21
+
+**四个现场问题：有时不出现（启动那一次）、桌面端「跳过」点不到、侧边栏按钮被挤没、官方客户端里按钮样式错乱。**
+*Four field reports: an intro that sometimes never appears on launch, an unreachable Skip on desktop, a squeezed sidebar button, and buttons styled by the host instead of by us.*
+
+这一版没有新功能，全部是在补「沉默失败」：下面四条都是**什么都不发生、也不告诉你为什么**的那一类。
+
+### 1. 「有时整个启动都不出现」—— 三个各自独立的原因，逐个堵死
+
+**① 设置没读到 = 整轮不播。** `settingsLoaded` 是 `decidePlay` 的硬门槛；而 `/videos.json` 只读**一次**，
+失败后 `settingsLoaded` 永远是假，于是这一整轮启动都不会播，屏幕上什么都没有。
+- 现在 `loadCatalog()` 会**重试两次**（400ms / 1200ms）—— 首屏本来就在和插件自己的路由抢跑；
+- 仍然没答，AppRoot 在 **8 秒**后调 `markSettingsFallback()`，用宿主默认值照常决策，并在诊断日志里留一行。
+  兜底只在「宿主确实没答」时生效，不会覆盖用户关掉开关的选择。
+
+**② 启动记录在「播之前」就被写掉了。** 0.4.2 是先 `recordDecision()` 再 `playMode()`；只要那次 resolve 失败
+（或片库还空着），`bootPlayed` 已经为真，之后整轮都不会再试 —— 没播、也不会再播。
+- 现在只有**真正把一个片段交给播放器之后**才写记录；失败则按 `1.2s / 3s / 8s` 退避重试三次，仍失败才放弃并记一条日志。
+- 同一时刻只允许一次尝试（`inFlightRef`），避免会话绑定、设置到达、重试三种触发叠出两层浮层。
+
+**③ 没有会话就一律不播。** `decidePlay()` 第一行是 `sessionId === null → none`，可「每次启动播一次」跟会话无关：
+启动后停在会话列表、或 ui-session 绑定慢半拍，这一条就被判成「还没会话」，而 effect 不会因为「后来有会话了」自动补播。
+- 现在**启动规则不再要求会话**（`no conversation` 只在关掉开关后的「新会话才播」规则里才意味着不播）。
+
+### 2. 桌面端：窗口三按钮压住片头，「跳过」点不到（issue #5）
+
+Windows 主窗口用的是 `titleBarStyle: hidden` + `titleBarOverlay`，最小化/最大化/关闭由**系统原生绘制**，
+任何 `z-index` 都盖不住，点击也一定被它们先吃掉 —— 右上角的「跳过」正好落在它们的点击区里。
+- 「跳过」改为**下移到窗口控制条之下**，用浏览器为 Window Controls Overlay 发布的几何量
+  `env(titlebar-area-height)`；不支持 WCO 的环境该值退化为 `0px`，位置与旧版一致（先写一条普通声明做兜底）。
+- 新增 **Esc 关闭**：键盘是唯一不会被系统窗口按钮吞掉的出口，按钮的 `title`/`aria-label` 也写明了。
+- 左上角的常驻文字同样下移，不再压到标题栏上。
+
+### 3. 侧边栏 🎛 点不开（issue #1）
+
+`sidebar.footer.action` 是**一条共享的 flex 行**（宿主样式 `display:flex;width:100%`），另一个插件若在同一行渲染
+整行宽的面板，本插件那个格子会被压扁到点不到。
+- 外层改为 `.dba-pin-wrap`：`flex:0 0 auto`（永不收缩）+ `position:relative; z-index:2`（被压住时也画在上面、也接得到点击）。
+- 原来那行内联 `style` 也一并去掉，样式只在 CSS 里定义一处。
+
+### 4. 官方客户端里按钮样式错乱（issue #6）
+
+两个原因，都是「我们以为在用宿主的变量，其实没有」：
+- 官方客户端有**全局 button 样式**（高度、内边距、背景、字体），我们的按钮继承了它 —— 同一份 DOM 在浏览器里正常、在应用里变形。
+  现在加了一个**只作用于自己子树**的重置，用 `:where()` 把特异性压到元素级，`.dba-skip` / `.dba-pin` 等类规则仍然覆盖它
+  （这条不能反向改：一旦重置赢过 `.dba-skip`，浮层就没有退出按钮了）；
+- 颜色引用的是 `--dsw-alias-text-primary/secondary`、`--dsw-alias-bg-elevated` —— **宿主根本没有这些 token**
+  （真实的是 `--dsw-alias-label-primary/secondary/tertiary`、`--dsw-specific-menu`）。所以悬停色一直落到 `#191919`
+  这个深色兜底值上，在深色侧边栏里等于「看不见」。现已全部换成真实 token，并保留浅色兜底。
+
+### 测试
+
+新增两组，都接进 `npm run check`（现 **20 组**）：
+- `verify:settings-fallback` —— 用真实 `ClientStore` + 脚本化 `fetch` 驱动：失败后的重试次数、`settingsLoaded`
+  仍为假、兜底后真的能决策、重试成功时宿主值优先、404 与网络错误同样处理；
+- `verify:desktop-chrome` —— 断言四个现场问题对应的 CSS/UX 不变量（WCO 几何与普通声明顺序、Esc、`flex:0 0 auto`、
+  `z-index`、`:where()` 重置、不再出现不存在的 token）。
+`verify:play-decision` 的矩阵按新规则更新：「没有会话也播」成为断言，而不是被删掉的旧行为。
+
 ## 0.4.2 — 2026-10-02
 
 **新增：`每次启动 DSH 时播放一次` 开关（默认开）—— 修掉「片头是一次性的」**

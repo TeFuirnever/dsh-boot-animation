@@ -81,6 +81,29 @@ export type Settings = {
 /** The host's default, mirrored so the pre-payload state equals "not loaded yet". */
 export const DEFAULT_PLAY_ON_APP_START = true
 
+/**
+ * How long the client waits for the host's settings before deciding anyway (0.4.3).
+ *
+ * `settingsLoaded` is a HARD gate on the when-to-play rule: no payload, no
+ * decision. That is right for the normal case (the payload arrives in
+ * milliseconds) and wrong for a host whose `/videos.json` never answers — then
+ * the gate does not protect the user's choice, it just means "no intro, silently,
+ * for the rest of this launch". After this long the client decides with whatever
+ * it already has and says so in the diagnostic log.
+ */
+export const SETTINGS_FALLBACK_MS = 8000
+
+/**
+ * Backoff for a failed `/videos.json` read: three attempts, ~1.6s of total wait.
+ *
+ * Long enough to ride out a route that is registered a beat after the bundle
+ * runs, short enough that a genuinely broken host still fails visibly instead of
+ * hanging in `loading` forever.
+ */
+const CATALOG_RETRY_DELAYS_MS = [400, 1200]
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
 export type Playback = {
   clipId: string | null
   previewClipId: string | null
@@ -171,6 +194,9 @@ export class ClientStore {
 
   #listeners = new Set<() => void>()
 
+  /** Set once the client stopped waiting for the host's settings (0.4.3). */
+  #fallbackDecided = false
+
   subscribe = (listener: () => void): (() => void) => {
     this.#listeners.add(listener)
     return () => {
@@ -218,53 +244,92 @@ export class ClientStore {
     return param === '' ? LIST_URL : LIST_URL + '?' + param
   }
 
-  /** Read the library and the settings from the host. Safe to call repeatedly. */
+  /**
+   * Read the library and the settings from the host, with a bounded retry.
+   *
+   * Safe to call repeatedly. The retry exists because ONE failed read used to cost
+   * the whole launch: `settingsLoaded` stayed false, `decidePlay` refuses to decide
+   * without it, and the user just got no intro — silently. First paint races the
+   * plugin's own routes, so a single early 502 is not a reason to lose the
+   * animation until the next restart.
+   */
   async loadCatalog(): Promise<void> {
     this.#set({ loading: true })
-    try {
-      const response = await fetch(this.#listUrl(), { cache: 'no-store' })
-      if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
-      const data = (await response.json()) as {
-        videos?: ClipInfo[]
-        userDir?: string
-        accepts?: string[]
-        selectedClipId?: string | null
-        randomPlayback?: boolean
-        fitMode?: FitMode
-        playOnAppStart?: boolean
-        conversationClipId?: string | null
+    let lastError: unknown = null
+    for (let attempt = 0; attempt <= CATALOG_RETRY_DELAYS_MS.length; attempt++) {
+      if (attempt > 0) await sleep(CATALOG_RETRY_DELAYS_MS[attempt - 1] ?? 1000)
+      try {
+        const response = await fetch(this.#listUrl(), { cache: 'no-store' })
+        if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+        const data = (await response.json()) as {
+          videos?: ClipInfo[]
+          userDir?: string
+          accepts?: string[]
+          selectedClipId?: string | null
+          randomPlayback?: boolean
+          fitMode?: FitMode
+          playOnAppStart?: boolean
+          conversationClipId?: string | null
+        }
+        this.#set({
+          catalog: {
+            clips: Array.isArray(data.videos) ? data.videos : [],
+            userDir: typeof data.userDir === 'string' ? data.userDir : '',
+            accepts: Array.isArray(data.accepts) ? data.accepts : [],
+          },
+          settings: {
+            selectedClipId: typeof data.selectedClipId === 'string' ? data.selectedClipId : null,
+            randomPlayback: data.randomPlayback === true,
+            fitMode: data.fitMode === 'contain' ? 'contain' : 'cover',
+            /**
+             * A host that predates 0.4.2 does not send this field. Its behaviour
+             * WAS "play once per new conversation", so an old host reads as `false`
+             * — the older rule — rather than being handed the new one it does not
+             * know about. A 0.4.2+ host always sends an explicit boolean.
+             */
+            playOnAppStart:
+              data.playOnAppStart === undefined ? false : data.playOnAppStart === true,
+          },
+          settingsLoaded: true,
+          conversationClipId: typeof data.conversationClipId === 'string' ? data.conversationClipId : null,
+          loading: false,
+          status: { text: '', kind: '' },
+        })
+        log('catalog loaded', {
+          clips: data.videos?.length ?? 0,
+          conversationClipId: data.conversationClipId ?? null,
+          attempt,
+        })
+        return
+      } catch (error) {
+        lastError = error
       }
-      this.#set({
-        catalog: {
-          clips: Array.isArray(data.videos) ? data.videos : [],
-          userDir: typeof data.userDir === 'string' ? data.userDir : '',
-          accepts: Array.isArray(data.accepts) ? data.accepts : [],
-        },
-        settings: {
-          selectedClipId: typeof data.selectedClipId === 'string' ? data.selectedClipId : null,
-          randomPlayback: data.randomPlayback === true,
-          fitMode: data.fitMode === 'contain' ? 'contain' : 'cover',
-          /**
-           * A host that predates 0.4.2 does not send this field. Its behaviour
-           * WAS "play once per new conversation", so an old host reads as `false`
-           * — the older rule — rather than being handed the new one it does not
-           * know about. A 0.4.2+ host always sends an explicit boolean.
-           */
-          playOnAppStart:
-            data.playOnAppStart === undefined ? false : data.playOnAppStart === true,
-        },
-        settingsLoaded: true,
-        conversationClipId: typeof data.conversationClipId === 'string' ? data.conversationClipId : null,
-        loading: false,
-        status: { text: '', kind: '' },
-      })
-      log('catalog loaded', { clips: data.videos?.length ?? 0, conversationClipId: data.conversationClipId ?? null })
-    } catch (error) {
-      notify('catalog load failed', String(error))
-      // `settingsLoaded` stays false: the host never answered, so the decision
-      // effect keeps waiting rather than guessing at a rule the user chose.
-      this.#set({ loading: false, status: { text: '读取片库失败：' + String(error), kind: 'dba-err' } })
     }
+    notify('catalog load failed', String(lastError))
+    // `settingsLoaded` stays false: the host never answered. AppRoot then waits at
+    // most `SETTINGS_FALLBACK_MS` before calling `markSettingsFallback()`, so a
+    // broken route degrades to "plays with defaults" instead of "never plays".
+    this.#set({ loading: false, status: { text: '读取片库失败：' + String(lastError), kind: 'dba-err' } })
+  }
+
+  /**
+   * Decide with what we have, because the host is not going to answer (0.4.3).
+   *
+   * Called on a timer by AppRoot while `settingsLoaded` is still false. Keeps the
+   * current settings (the host's defaults) rather than inventing a rule, flips the
+   * gate, and leaves one line in the diagnostic log. Idempotent, and a no-op when
+   * the payload did arrive or the fallback already ran.
+   */
+  markSettingsFallback(why: string): void {
+    if (this.#snapshot.settingsLoaded || this.#fallbackDecided) return
+    this.#fallbackDecided = true
+    notify('settings never arrived — deciding with defaults', { why })
+    this.#set({ settingsLoaded: true, loading: false })
+  }
+
+  /** True once the client stopped waiting for the host's settings payload. */
+  get usedSettingsFallback(): boolean {
+    return this.#fallbackDecided
   }
 
   /** Everything that reaches the host's selection endpoint goes through here. */

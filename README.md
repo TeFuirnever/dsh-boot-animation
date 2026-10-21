@@ -304,6 +304,10 @@ ffprobe -v trace 修好的.mp4 2>&1 | grep -m1 moov   # 偏移应该很小
 | 完全没出现 | 十有八九是缓存：**Ctrl+Shift+R**（普通 F5 不够）。升级/装完还要**重启一次 DSH 服务** |
 | 装完当天见过一次，之后再也没见过 | **0.4.1 及之前的 bug**：那时是「每个会话只播一次」。升到 0.4.2 后是「每次启动 DSH 一次」。还不行就看下一行 |
 | 一直不播（怀疑"脚本没生效"） | 见下面「装上了但没反应 / 脚本像没生效」一节，三条可能逐条排除 |
+| 有时整个启动都不出现，重启又好 | **0.4.2 及之前的 bug**：`/videos.json` 只要有一次没读到，`settingsLoaded` 就一直是假，整轮启动都不会播。0.4.3 起会先重试两次，仍未答就在 8 秒后用宿主默认值照常播 |
+| 桌面端右上角三个窗口按钮压着片头，「跳过」点不到 | 0.4.3 起「跳过」自动下移到窗口按钮**之下**，并且**随时按 Esc** 都能退出。系统绘制的窗口按钮永远赢过任何 z-index，所以不再靠层级硬顶 |
+| 侧边栏的 🎛 点了没反应 / 按钮被挤没 | 0.4.3 起这个按钮不会再被同一条页脚行里的其它插件压扁（`flex:0 0 auto` + 置顶）。若对方渲染了整行宽的卡片，把它的显示位置改到「设置」可彻底避免 |
+| 官方客户端里按钮样式怪、图标看不清 | 0.4.3 起不再继承宿主的全局按钮样式，也不再引用宿主根本没有的 `--dsw-alias-text-*` 变量（那会让悬停态在深色侧边栏里变成看不见的深灰） |
 | 钉住了也不播 | 确认图钉是绿色；确认打开的就是被钉的那个会话 |
 | 黑屏无画面 | 先看 moov 是否前置（见上「排错：视频是黑的」）；再访问 `/dsh-boot-animation/status.json` 看片源；最后看浏览器控制台有没有解码错误 |
 | 换了片没生效 | 片库里点完要有 ✓ 才生效；确认文件在 `videos/` 里并点了「刷新」 |
@@ -444,7 +448,9 @@ JSON.stringify({ boot: sessionStorage.getItem('dsh-boot-animation:boot'),
 | `npm run verify:app-start-setting` | 开关作为宿主设置的完整往返：默认 true、`/select` 写入与读回、非布尔被拒、v3 旧文件迁移 |
 | `npm run verify:letterbox` | 用 CDP 驱动本机 Edge，量出所选贴合方式实际留多少黑边，并**量出覆盖层是否等于视口 + 四角/中心命中测试 + 阴性对照** |
 | `npm run verify:boot-animation` / `verify:pin` | 真 GUI 端到端（`npm run verify:gui-boot` / `verify:gui-pin`；需要带 `--remote-debugging-port` 的 DSH GUI，**不是** `npm run check` 的一部分）。`gui-boot` 也会量一遍覆盖层 |
-| `npm run check` | 上面全部 **18 组**（build / routes / selection / conversation / cache / blank / boot / boot-scope / play-decision / app-start-setting / preview / playback / random / fallback / install / teardown / version-refresh / session-id） |
+| `npm run verify:settings-fallback` | 宿主读不到设置时的两级兜底：`/videos.json` 重试两次，仍未答才由 8 秒定时器放行决策（用真实 `ClientStore` + 脚本化 `fetch` 驱动） |
+| `npm run verify:desktop-chrome` | 四个现场问题的 CSS/UX 不变量：标题栏让位（WCO 几何 + Esc）、页脚按钮不可被压扁、`:where()` 重置不夺走按钮边框、不再引用不存在的宿主 token |
+| `npm run check` | 上面全部 **20 组**（build / routes / selection / conversation / cache / blank / boot / boot-scope / play-decision / settings-fallback / app-start-setting / preview / playback / random / fallback / install / teardown / version-refresh / session-id / desktop-chrome） |
 | `npm run build:client` | 先跑 CSS 检查再构建（防带病构建） |
 
 两个脚本都是被真实 bug 逼出来的，各自都有过一次"用自己的规则测自己"的教训：

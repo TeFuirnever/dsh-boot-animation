@@ -321,7 +321,9 @@ export type PlayDecisionInput = {
  *   1. PINNED     the current conversation is the pinned one and we just entered
  *                 it -> replay. Unaffected by `playOnAppStart` and by any record.
  *   2. APP-START  `playOnAppStart` is on and this launch has not played yet ->
- *                 play once, wherever we are.
+ *                 play once. **No conversation required** (0.4.3): the launch is
+ *                 the scope, so a host that has not settled a binding yet, or a
+ *                 launch that opens to the session list, still gets its intro.
  *   3. NEW CONV.  `playOnAppStart` is off -> the original rule: a conversation
  *                 with no turns yet that has not played before.
  *
@@ -333,19 +335,30 @@ export type PlayDecisionInput = {
  * the whole matrix instead of inferring the rule from a rendered overlay.
  */
 export function decidePlay(input: PlayDecisionInput): PlayDecision {
-  if (input.sessionId === null) return { action: 'none', reason: 'no conversation yet' }
-
-  if (input.pinned !== null && input.pinned === input.sessionId) {
+  // 1. PINNED. Needs a conversation AND a fresh entry into it. Checked before the
+  //    settings gate because a pin is explicit user intent.
+  if (input.sessionId !== null && input.pinned !== null && input.pinned === input.sessionId) {
     if (!input.entered) return { action: 'none', reason: 'already in the pinned conversation' }
     return { action: 'play', reason: 'pinned' }
   }
 
   if (!input.settingsLoaded) return { action: 'none', reason: 'settings not loaded yet' }
 
+  // 2. APP-START. Deliberately does NOT need a conversation (0.4.3).
+  //
+  //    Up to 0.4.2 the first line of this function was "no sessionId -> no play",
+  //    which made the boot animation depend on the conversation binding settling
+  //    first. On a launch that opens to the workspace/session list, or whose
+  //    ui-session binding is slow, the rule answered "no conversation yet" — and
+  //    because the effect only re-runs when one of its inputs changes, the intro
+  //    could be skipped for the whole launch. That is one of the "有时候就是不出现"
+  //    reports: a boot animation is a property of the LAUNCH, not of a conversation.
   if (input.settings.playOnAppStart) {
     return input.bootPlayed ? { action: 'none', reason: 'this launch already played' } : { action: 'play', reason: 'app-start' }
   }
 
+  // 3. NEW CONVERSATION. The original rule, which IS about a conversation.
+  if (input.sessionId === null) return { action: 'none', reason: 'no conversation yet' }
   if (!input.isNewConversation) return { action: 'none', reason: 'not a new conversation' }
   if (input.sessionPlayed) return { action: 'none', reason: 'this conversation already played' }
   return { action: 'play', reason: 'new-conversation' }
