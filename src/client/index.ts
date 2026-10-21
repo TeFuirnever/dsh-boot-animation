@@ -51,7 +51,7 @@ export {
 } from './session.js'
 export { DEFAULT_PLAY_ON_APP_START } from './store.js'
 export { ClientStore, mediaUrlFor } from './store.js'
-export { releaseVideo } from './ui.js'
+export { HANDOFF_MS, releaseVideo } from './ui.js'
 
 type ClientContext = {
   slots: {

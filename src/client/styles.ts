@@ -33,8 +33,11 @@ export const CSS = `
   cursor:pointer;white-space:nowrap}
 .dba-root{position:fixed;inset:0;z-index:2147483000;background:#000;
   display:flex;align-items:center;justify-content:center;
-  pointer-events:auto;cursor:pointer;overflow:hidden}
-.dba-video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
+  pointer-events:auto;cursor:pointer;overflow:hidden;
+  transition:background-color .46s ease}
+.dba-video{width:100%;height:100%;object-fit:contain;background:#000;display:block;
+  transform-origin:center;animation:dba-focus-in .34s ease;
+  transition:opacity .46s ease,filter .46s ease,transform .46s ease}
 /* The ONLY difference between the fit modes is object-fit.
    Do not "harden" this with position/inset changes: the bar fix does not need
    them, and an overlay that rendered correctly under flex + percentage sizing
@@ -44,6 +47,36 @@ export const CSS = `
    NOTE: never put a backtick in this block — the whole sheet is a template
    literal, and one backtick ends it. scripts/check-css-template.mjs enforces it. */
 .dba-video.dba-cover{object-fit:cover;object-position:center}
+/* ---------------------------------------------------------------------------
+   0.4.4: the hand-off. The animation used to CUT: store.stop() unmounted this
+   layer in the same frame, so the app appeared behind a hard edge.
+
+   Now the clip defocuses and fades while a backdrop blur on the layer decays
+   from 18px to none. Because the blur is BEHIND the video, the app resolves out
+   of softness instead of popping in: at the first frame the video is still
+   opaque and hides the blur, and by the time the video is transparent the blur
+   is already clearing. One transition, no second layer, no overlay left behind.
+
+   The timing here must stay SHORTER than HANDOFF_MS (ui.ts); a transition cut
+   halfway looks worse than no transition at all. verify-handoff.mjs asserts it.
+   --------------------------------------------------------------------------- */
+@keyframes dba-focus-in{from{opacity:0;filter:blur(14px);transform:scale(1.04)}
+  to{opacity:1;filter:blur(0);transform:scale(1)}}
+@keyframes dba-defocus{from{backdrop-filter:blur(18px) saturate(1.06);-webkit-backdrop-filter:blur(18px) saturate(1.06)}
+  to{backdrop-filter:blur(0px) saturate(1);-webkit-backdrop-filter:blur(0px) saturate(1)}}
+.dba-root.dba-leaving{background-color:transparent;pointer-events:none;
+  animation:dba-defocus .46s ease forwards}
+.dba-root.dba-leaving .dba-video{opacity:0;filter:blur(16px);transform:scale(1.02)}
+/* Chrome IS faded, not merely hidden: the hint runs an infinite opacity
+   animation, which would otherwise keep winning over the declaration below. */
+.dba-root.dba-leaving .dba-skip,.dba-root.dba-leaving .dba-hint,
+.dba-root.dba-leaving .dba-what,.dba-root.dba-leaving .dba-status{opacity:0;animation:none}
+@media (prefers-reduced-motion:reduce){
+  .dba-video{animation:none}
+  .dba-root{transition:none}
+  .dba-root.dba-leaving{animation:none}
+  .dba-root.dba-leaving .dba-video{transition:none}
+}
 /* 0.4.3 (issue #5): the top strip of the window belongs to the OS caption
    buttons on the desktop client, and a native window control always wins the
    hit test — no z-index can reach it. So the button keeps its right edge but

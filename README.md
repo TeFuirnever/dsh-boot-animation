@@ -119,6 +119,22 @@ DSH 的客户端 bundle 响应带 `cache-control: max-age=31536000, immutable`�
 > 记一条 `conversation-override-stale`；文件回来了这条钉住自动生效
 > （不会因为一次失联就被清掉）。
 
+## 片头是怎么进出画面的（0.4.4）
+
+进来是「显影」，出去是「虚化淡出」，都不是硬切：
+
+| 阶段 | 视觉 | 时长 |
+|---|---|---|
+| 进入 | 视频从 `opacity 0 / blur(14px) / scale(1.04)` 显影到清晰 | 340ms |
+| 退场 | 视频 `opacity → 0` + `blur(16px)` + 轻微放大；同时整层底色变透明，**backdrop 模糊从 18px 衰减到 0** | 460ms（浮层 500ms 后才卸载） |
+
+退场的模糊在视频**背后**，所以应用是「先糊后清」地浮出来，而不是从硬边后弹出。
+退场期间底层立刻可点（`pointer-events:none`），不需要等动画放完。
+系统开了「减少动态效果」（`prefers-reduced-motion`）时，这两段动画直接关掉。
+
+两个时长（`460ms` 与 `HANDOFF_MS = 500`）写在不同文件里，**必须**保持前者更短 ——
+动画被半路切断比没有动画更难看，`npm run verify:handoff` 专门断言这一条。
+
 ## 换自己的视频（片库）
 
 插件现在是一个**片库**，不是单个槽位：它会把所有能找到的视频都列出来，你选一个，选择会被记住。
@@ -450,7 +466,8 @@ JSON.stringify({ boot: sessionStorage.getItem('dsh-boot-animation:boot'),
 | `npm run verify:boot-animation` / `verify:pin` | 真 GUI 端到端（`npm run verify:gui-boot` / `verify:gui-pin`；需要带 `--remote-debugging-port` 的 DSH GUI，**不是** `npm run check` 的一部分）。`gui-boot` 也会量一遍覆盖层 |
 | `npm run verify:settings-fallback` | 宿主读不到设置时的两级兜底：`/videos.json` 重试两次，仍未答才由 8 秒定时器放行决策（用真实 `ClientStore` + 脚本化 `fetch` 驱动） |
 | `npm run verify:desktop-chrome` | 四个现场问题的 CSS/UX 不变量：标题栏让位（WCO 几何 + Esc）、页脚按钮不可被压扁、`:where()` 重置不夺走按钮边框、不再引用不存在的宿主 token |
-| `npm run check` | 上面全部 **20 组**（build / routes / selection / conversation / cache / blank / boot / boot-scope / play-decision / settings-fallback / app-start-setting / preview / playback / random / fallback / install / teardown / version-refresh / session-id / desktop-chrome） |
+| `npm run verify:handoff` | 进出场的时序不变量：`HANDOFF_MS` 必须**长于** CSS 时长（半路切断比没有动画更难看）、退场同时有淡出与模糊、backdrop 模糊从强到 0、退场期间指针穿透、reduced-motion 有守卫 |
+| `npm run check` | 上面全部 **21 组**（build / routes / selection / conversation / cache / blank / boot / boot-scope / play-decision / settings-fallback / app-start-setting / preview / playback / random / fallback / install / teardown / version-refresh / session-id / desktop-chrome / handoff） |
 | `npm run build:client` | 先跑 CSS 检查再构建（防带病构建） |
 
 两个脚本都是被真实 bug 逼出来的，各自都有过一次"用自己的规则测自己"的教训：

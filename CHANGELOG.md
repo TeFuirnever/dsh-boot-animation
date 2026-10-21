@@ -5,6 +5,38 @@
 > Changes that a user can see, one section per release. English one-liners are
 > included so an English reader can scan the list.
 
+## 0.4.4 — 2026-10-21
+
+**退场不再是硬切：片尾虚化淡出，应用从模糊里浮出来。**
+*The exit is a hand-off now: the clip defocuses and fades while the app resolves out of softness.*
+
+以前的退出是**一帧切换**：`store.stop()` 在同一帧把整层卸载，片头与工作区之间留下一条硬边 ——
+整段动画里唯一一处「像插件、不像产品」的地方。
+
+现在分成两层同时进行：
+
+- 视频自己 `opacity → 0`、`filter: blur(16px)`、轻微 `scale(1.02)`；
+- 同时整层底色由黑变透明，并用 **backdrop 模糊从 18px 衰减到 0**。
+
+模糊在视频**背后**，所以应用是「先糊后清」浮出来的，而不是从黑幕后面弹出来 —— 一个干净的
+defocus → focus 过渡，也是大厂 UI 里最常见的收尾方式。
+
+几个刻意的细节：
+
+- 模糊用 `@keyframes` 而不是 transition：只有动画能表达「18px → 0」这种衰减；
+- 退场期间 `pointer-events:none`，底层应用**立刻可点**，不必等浮层卸载；
+- 进场也有对称的一小段：视频从 `opacity 0 / blur(14px) / scale(1.04)` 显影，避免「啪」地出现；
+- 「跳过 / 提示 / 状态 / 左上角文字」先停掉各自的动画再淡出（提示条有一个无限 opacity 动画，
+  不停掉它会盖住淡出）；
+- `prefers-reduced-motion` 下两段动画全关，行为与 0.4.3 一致；
+- 计时 `HANDOFF_MS = 500ms` **长于** CSS 的 `.46s` —— 动画被半路切断比没有动画更难看。
+  两个数字分处两个文件、极易各自漂移，`verify:handoff` 专门盯这一条。
+
+### 测试
+
+新增 `verify:handoff` 并接进 `npm run check`（现 **21 组**）：断言计时长于 CSS、退场确有淡出+模糊、
+backdrop 从强到 0、退场期间指针穿透、进场动画存在、reduced-motion 有守卫、常驻文字动画被停掉。
+
 ## 0.4.3 — 2026-10-21
 
 **四个现场问题：有时不出现（启动那一次）、桌面端「跳过」点不到、侧边栏按钮被挤没、官方客户端里按钮样式错乱。**

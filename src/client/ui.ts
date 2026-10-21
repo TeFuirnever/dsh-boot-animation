@@ -64,6 +64,16 @@ const ERROR_LINGER_MS = 8000
  */
 const PLAY_RETRY_DELAYS_MS = [1200, 3000, 8000]
 
+/**
+ * How long the exit hand-off runs before the overlay leaves the tree (0.4.4).
+ *
+ * Exported so `scripts/verify-handoff.mjs` can assert this is LONGER than the CSS
+ * timing: the two live in different files, and if the numbers drift apart the
+ * transition gets cut halfway and silently degrades back into the hard cut it was
+ * meant to replace.
+ */
+export const HANDOFF_MS = 500
+
 function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B'
   if (n < 1024) return n + ' B'
@@ -126,24 +136,47 @@ export function BootOverlay({ store }: { store: ClientStore }): ReactElement | n
   const { url, nonce, phase, clipId, reason, previewClipId } = snapshot.playback
   const fit = snapshot.settings.fitMode
   const [needsTap, setNeedsTap] = useState(false)
+  const [leaving, setLeaving] = useState(false)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const closedRef = useRef(false)
+  const exitTimerRef = useRef<number | null>(null)
 
+  /**
+   * Leave through a hand-off instead of a cut (0.4.4).
+   *
+   * `store.stop()` unmounts the overlay in the same frame, so the app used to
+   * appear behind a hard edge — the one moment of the whole animation that looked
+   * like a plugin instead of part of the product. Now the overlay marks itself
+   * leaving, plays the CSS hand-off (clip blurs/fades out while a backdrop blur
+   * decays from strong to none, so the app resolves out of softness), and only
+   * then drops out of the tree.
+   *
+   * The delay is `HANDOFF_MS`, deliberately longer than the CSS timing: cutting a
+   * transition halfway is worse than not having one.
+   */
   const close = useCallback(() => {
+    if (closedRef.current) return
     closedRef.current = true
-    const video = videoRef.current
-    if (video !== null) {
-      try {
-        video.pause()
-      } catch {
-        /* already stopped */
-      }
-    }
+    // Fullscreen is dropped up front, so the fade itself plays in the normal
+    // window — exiting it at the end would snap the window after the transition.
     if (document.fullscreenElement !== null && document.exitFullscreen !== undefined) {
       document.exitFullscreen().catch(() => {})
     }
-    store.stop()
+    setLeaving(true)
+    exitTimerRef.current = window.setTimeout(() => {
+      exitTimerRef.current = null
+      store.stop()
+    }, HANDOFF_MS)
   }, [store])
+
+  // An exit that outlives the tree would stop a store the picker may still own.
+  useEffect(
+    () => () => {
+      if (exitTimerRef.current !== null) window.clearTimeout(exitTimerRef.current)
+      exitTimerRef.current = null
+    },
+    [],
+  )
 
   useEffect(() => {
     if (url === null) return undefined
@@ -151,6 +184,7 @@ export function BootOverlay({ store }: { store: ClientStore }): ReactElement | n
     if (video === null) return undefined
     closedRef.current = false
     setNeedsTap(false)
+    setLeaving(false)
     video.muted = true
 
     const startedAt = performance.now()
@@ -243,7 +277,7 @@ export function BootOverlay({ store }: { store: ClientStore }): ReactElement | n
 
   return h(
     'div',
-    { className: 'dba-root', onClick: activate },
+    { className: leaving ? 'dba-root dba-leaving' : 'dba-root', onClick: activate },
     h('video', {
       ref: videoRef,
       className: fit === 'cover' ? 'dba-video dba-cover' : 'dba-video',
